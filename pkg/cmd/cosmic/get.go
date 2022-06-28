@@ -15,12 +15,26 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func storeResource(stackName backend.StackSummary, resState resource.State) error {
-	fmt.Printf("[%s] %s %s\n", stackName.Name(), resState.Type.String(), resState.URN.Name())
+func storeResource(stackName backend.StackSummary, resState resource.State, props []Prop, out chan []string) error {
+	resourceProps := resState.Outputs.Mappable()
+
+	line := make([]string, 3+len(props))
+	line[0] = stackName.Name().String()
+	line[1] = resState.Type.String()
+	line[2] = resState.URN.Name().String()
+
+	for i, prop := range props {
+		val, ok := resourceProps[prop.Name]
+		if !ok {
+			return nil
+		}
+		line[3+i] = fmt.Sprintf("%s ", val)
+	}
+	out <- line
 	return nil
 }
 
-func handleStack(stackName backend.StackSummary, b httpstate.Backend, q Query, ctx context.Context) error {
+func handleStack(stackName backend.StackSummary, b httpstate.Backend, q Query, ps []Prop, out chan []string, ctx context.Context) error {
 	stk, err := b.GetStack(ctx, stackName.Name())
 	httpStack := stk.(httpstate.Stack)
 
@@ -41,7 +55,14 @@ func handleStack(stackName backend.StackSummary, b httpstate.Backend, q Query, c
 	if err != nil {
 		return fmt.Errorf("error retrieving stack: %s", stackName.Name())
 	}
-
+	//conf, err := b.Client().GetStackUpdates(ctx, httpStack.StackIdentifier())
+	//if err != nil {
+	//	return fmt.Errorf("error retrieving stack: %s", stackName.Name())
+	//}
+	//author := "<none>"
+	//if len(conf) > 0 {
+	//	fmt.Println(conf[len(conf)-1].Config)
+	//}
 	for _, resState := range snap.Resources {
 		if resState == nil {
 			continue
@@ -65,7 +86,7 @@ func handleStack(stackName backend.StackSummary, b httpstate.Backend, q Query, c
 		if q.ResourceType.Resource != "" && name != q.ResourceType.Resource {
 			continue
 		}
-		storeResource(stackName, *resState)
+		storeResource(stackName, *resState, ps, out)
 	}
 	return nil
 }
@@ -74,6 +95,22 @@ func isResourceType(query string) bool {
 	return strings.Count(query, ":") > 0
 }
 
+func parseProps(propstring string) []Prop {
+	if propstring == "" {
+		return []Prop{}
+	}
+
+	ps := strings.Split(propstring, ",")
+
+	props := make([]Prop, len(ps))
+
+	for i, prop := range ps {
+		props[i] = Prop{
+			Name: prop,
+		}
+	}
+	return props
+}
 func parseQuery(p string) Query {
 	/*
 			urn:pulumi:production::acmecorp-website::custom:resources:Resource$aws:s3/bucket:Bucket::my-bucket
@@ -131,29 +168,16 @@ type Query struct {
 	ResourceType   ResourceTypeQuery
 }
 
-func getAllRedshift() {
-	/*
-		url := fmt.Sprintf("sslmode=require user=%v password=%v host=%v port=%v dbname=%v",
-			username,
-			password,
-			host,
-			port,
-			dbName)
-
-		var err error
-		var db *sql.DB
-		if db, err = sql.Open("postgres", url); err != nil {
-			return nil, fmt.Errorf("redshift connect error : (%v)"), err
-		}
-
-		if err = db.Ping(); err != nil {
-			return nil, fmt.Errorf("redshift ping error : (%v)", err)
-		}
-		return db, nil
-	*/
+type Cond struct {
+	Operator string
+	Args     []string
+}
+type Prop struct {
+	Name string
+	Cond Cond
 }
 
-func getAll(q Query) {
+func getAll(q Query, ps []Prop) {
 	// <org>/<project>/<stack>
 	sink := diag.DefaultSink(os.Stdout, os.Stderr, diag.FormatOptions{
 		Color: colors.Raw,
@@ -170,45 +194,69 @@ func getAll(q Query) {
 		fmt.Printf("%s", err.Error())
 		return
 	}
-	ch := make(chan bool, len(stacks))
-	for _, stackName := range stacks {
-		go func(stackName backend.StackSummary) {
-			err = handleStack(stackName, b, q, ctx)
-			if err != nil {
-				//fmt.Println(err)
+	ch := make(chan []string, 100)
+	go func() {
+		processed := make(chan bool, len(stacks))
+		for _, stackName := range stacks {
+			go func(stackName backend.StackSummary) {
+				err = handleStack(stackName, b, q, ps, ch, ctx)
+				if err != nil {
+					//fmt.Println(err)
+				}
+				processed <- true
+			}(stackName)
+		}
+		for range stacks {
+			_, more := <-processed
+			if !more {
+				panic("what")
 			}
-			ch <- true
-		}(stackName)
-	}
-	for range stacks {
-		_, more := <-ch
+		}
+		close(ch)
+	}()
+
+	lines := [][]string{}
+	colwidth := make([]int, 3+len(ps))
+	for {
+		line, more := <-ch
+		for i, elem := range line {
+			curLength := len(elem)
+			if colwidth[i] >= curLength {
+				continue
+			}
+			colwidth[i] = curLength
+		}
+		lines = append(lines, line)
 		if !more {
-			panic("what")
+			break
 		}
 	}
-	close(ch)
+	for _, line := range lines {
+		for i, elem := range line {
+			width := colwidth[i]
+			fmt.Print(elem, strings.Repeat(" ", width-len(elem)), " ")
+		}
+		fmt.Println()
+	}
 }
+
 func newGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get",
 		Short: "gets resources on the pulumi service",
-		Args:  cmdutil.MaximumNArgs(1),
+		Args:  cmdutil.MaximumNArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
-			querystring := args[0]
-
-			// handle resource types
-			/*
-
-				curl \
-					-H "Accept: application/vnd.pulumi+8" \
-					-H "Content-Type: application/json" \
-					-H "Authorization: token $PULUMI_ACCESS_TOKEN" \
-					https://api.pulumi.com/api/stacks/{organization}/{project}/{stack}/export
-			*/
-
+			querystring := ""
+			propstring := ""
+			switch len(args) {
+			case 2:
+				propstring = args[1]
+				fallthrough
+			case 1:
+				querystring = args[0]
+			}
 			// handle stack queries
-			q := parseQuery(querystring)
-			getAll(q)
+			getAll(parseQuery(querystring), parseProps(propstring))
 		},
 	}
 	return cmd

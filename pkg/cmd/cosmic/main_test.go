@@ -6,6 +6,7 @@ import (
 
 func TestGetStackResourceOutputs(t *testing.T) {
 	t.Parallel()
-	//getAll(parseQuery("dixler/"))
-	getAll(parseQuery("aws:"))
+	//getAll(parseQuery("pulumi/"))
+	//getAll(parseQuery("aws:"), parseProps("bucket"))
+	getAll(parseQuery("aws:"), parseProps(""))
 }
