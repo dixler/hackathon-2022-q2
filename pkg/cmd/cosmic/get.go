@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/pulumi/pulumi/pkg/backend"
@@ -11,11 +12,39 @@ import (
 	"github.com/pulumi/pulumi/sdk/go/common/diag"
 	"github.com/pulumi/pulumi/sdk/go/common/diag/colors"
 	"github.com/pulumi/pulumi/sdk/go/common/resource"
-	"github.com/pulumi/pulumi/sdk/go/common/util/cmdutil"
 	"github.com/spf13/cobra"
 )
 
-func storeResource(stackName backend.StackSummary, resState resource.State, props []Prop, out chan []string) error {
+func isResourceMatch(res resource.State, q Query) bool {
+	resTypeParts := strings.Split(res.Type.String(), ":")
+
+	if len(resTypeParts) != 3 {
+		return false
+	}
+
+	provider := resTypeParts[0]
+	module := resTypeParts[1]
+	name := resTypeParts[2]
+
+	if q.ResourceType.Provider != "" && provider != q.ResourceType.Provider {
+		return false
+	}
+	if q.ResourceType.ModulePrefix != "" && !strings.HasPrefix(module, q.ResourceType.ModulePrefix) {
+		return false
+	}
+	if q.ResourceType.Module != "" && module != q.ResourceType.Module {
+		return false
+	}
+	if q.ResourceType.Resource != "" && name != q.ResourceType.Resource {
+		return false
+	}
+	return true
+}
+
+func storeResource(stackName backend.StackSummary, resState resource.State, q Query, props []Prop, out chan []string) error {
+	if !isResourceMatch(resState, q) {
+		return nil
+	}
 	resourceProps := resState.Outputs.Mappable()
 
 	line := make([]string, 3+len(props))
@@ -55,129 +84,16 @@ func handleStack(stackName backend.StackSummary, b httpstate.Backend, q Query, p
 	if err != nil {
 		return fmt.Errorf("error retrieving stack: %s", stackName.Name())
 	}
-	//conf, err := b.Client().GetStackUpdates(ctx, httpStack.StackIdentifier())
-	//if err != nil {
-	//	return fmt.Errorf("error retrieving stack: %s", stackName.Name())
-	//}
-	//author := "<none>"
-	//if len(conf) > 0 {
-	//	fmt.Println(conf[len(conf)-1].Config)
-	//}
 	for _, resState := range snap.Resources {
 		if resState == nil {
 			continue
 		}
-		resTypeParts := strings.Split(resState.Type.String(), ":")
-
-		if len(resTypeParts) != 3 {
-			continue
-		}
-
-		provider := resTypeParts[0]
-		module := resTypeParts[1]
-		name := resTypeParts[2]
-
-		if q.ResourceType.Provider != "" && provider != q.ResourceType.Provider {
-			continue
-		}
-		if q.ResourceType.Module != "" && module != q.ResourceType.Module {
-			continue
-		}
-		if q.ResourceType.Resource != "" && name != q.ResourceType.Resource {
-			continue
-		}
-		storeResource(stackName, *resState, ps, out)
+		storeResource(stackName, *resState, q, ps, out)
 	}
 	return nil
 }
 
-func isResourceType(query string) bool {
-	return strings.Count(query, ":") > 0
-}
-
-func parseProps(propstring string) []Prop {
-	if propstring == "" {
-		return []Prop{}
-	}
-
-	ps := strings.Split(propstring, ",")
-
-	props := make([]Prop, len(ps))
-
-	for i, prop := range ps {
-		props[i] = Prop{
-			Name: prop,
-		}
-	}
-	return props
-}
-func parseQuery(p string) Query {
-	/*
-			urn:pulumi:production::acmecorp-website::custom:resources:Resource$aws:s3/bucket:Bucket::my-bucket
-		        ^^^^^^ ^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^
-		        <org>  <stack-name> <project-name>   <parent-type>             <resource-type>       <resource-name>
-	*/
-	query := Query{}
-	rtQuery := &query.ResourceType
-	srQuery := &query.StackReference
-	if isResourceType(p) { // not a stack reference
-		resourceParts := strings.Split(p, ":")
-
-		switch len(resourceParts) {
-		case 3:
-			rtQuery.Resource = resourceParts[2]
-			fallthrough
-		case 2:
-			rtQuery.Module = resourceParts[1]
-			fallthrough
-		case 1:
-			rtQuery.Provider = resourceParts[0]
-		}
-	} else {
-		// Assume is a stack reference
-		stackParts := strings.Split(p, "/")
-
-		switch len(stackParts) {
-		case 3:
-			srQuery.Stack = stackParts[2]
-			fallthrough
-		case 2:
-			srQuery.Project = stackParts[1]
-			fallthrough
-		case 1:
-			srQuery.Org = stackParts[0]
-		}
-	}
-	return query
-}
-
-type StackRefQuery struct {
-	Org     string
-	Project string
-	Stack   string
-}
-
-type ResourceTypeQuery struct {
-	Provider string
-	Module   string // pathlike
-	Resource string
-}
-
-type Query struct {
-	StackReference StackRefQuery
-	ResourceType   ResourceTypeQuery
-}
-
-type Cond struct {
-	Operator string
-	Args     []string
-}
-type Prop struct {
-	Name string
-	Cond Cond
-}
-
-func getAll(q Query, ps []Prop) {
+func getAll(q Query, ps []Prop, flags getFlags) {
 	// <org>/<project>/<stack>
 	sink := diag.DefaultSink(os.Stdout, os.Stderr, diag.FormatOptions{
 		Color: colors.Raw,
@@ -189,7 +105,15 @@ func getAll(q Query, ps []Prop) {
 	}
 	ctx := context.Background()
 	// TODO this initial data load is truncated
-	stacks, err := b.ListStacks(ctx, backend.ListStacksFilter{})
+	filter := backend.ListStacksFilter{}
+	if q.StackReference.Org != "" {
+		filter.Organization = &q.StackReference.Org
+	}
+	if q.StackReference.Project != "" {
+		filter.Project = &q.StackReference.Project
+	}
+
+	stacks, err := b.ListStacks(ctx, filter)
 	if err != nil {
 		fmt.Printf("%s", err.Error())
 		return
@@ -200,64 +124,120 @@ func getAll(q Query, ps []Prop) {
 		for _, stackName := range stacks {
 			go func(stackName backend.StackSummary) {
 				err = handleStack(stackName, b, q, ps, ch, ctx)
-				if err != nil {
-					//fmt.Println(err)
-				}
 				processed <- true
 			}(stackName)
 		}
-		for range stacks {
-			_, more := <-processed
-			if !more {
-				panic("what")
-			}
+		for i := 0; i < len(stacks); i++ {
+			<-processed
 		}
+		close(processed)
 		close(ch)
 	}()
 
-	lines := [][]string{}
-	colwidth := make([]int, 3+len(ps))
-	for {
-		line, more := <-ch
-		for i, elem := range line {
-			curLength := len(elem)
-			if colwidth[i] >= curLength {
-				continue
-			}
-			colwidth[i] = curLength
+	total := 0
+	stackCounter := make(map[string]int)
+	resourceCounter := make(map[string]int)
+
+	for line := range ch {
+		//line, more := <-ch
+		for _, elem := range line {
+			fmt.Print(elem, "\t\t")
 		}
-		lines = append(lines, line)
-		if !more {
-			break
+		fmt.Println()
+
+		stackRefString := line[0]
+		stackRef := strings.Split(stackRefString, "/")
+		org := stackRef[0]
+		project := stackRef[1]
+		stack := stackRef[2]
+
+		//
+		stackCounter[org+"/"] += 1
+		stackCounter[org+"/"+project+"/"] += 1
+		stackCounter[org+"/"+project+"/"+stack] += 1
+
+		resourceTypeString := line[1]
+		resourceType := strings.Split(resourceTypeString, ":")
+		provider := resourceType[0]
+		module := resourceType[1]
+		name := resourceType[2]
+
+		// handle provider
+		resourceCounter[provider+":"] += 1
+
+		// handle module
+		modulePaths := strings.Split(module, "/")
+		for m := range modulePaths {
+			moduleKey := strings.Join(modulePaths[0:m+1], "/")
+			resourceCounter[provider+":"+moduleKey+":"] += 1
 		}
+
+		// handle name
+		resourceCounter[provider+":"+module+":"+name] += 1
+
+		total += 1
 	}
-	for _, line := range lines {
-		for i, elem := range line {
-			width := colwidth[i]
-			fmt.Print(elem, strings.Repeat(" ", width-len(elem)), " ")
+	fmt.Println()
+
+	fmt.Println("Summary")
+	fmt.Println("total", "-", total)
+	fmt.Println()
+
+	{
+		fmt.Println("Summary[by-stack]")
+		max_width := 0
+		keys := make([]string, 0, len(stackCounter))
+		for k := range stackCounter {
+			keys = append(keys, k)
+			if len(k) > max_width {
+				max_width = len(k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Println("stack", k, strings.Repeat("-", 1+max_width-len(k)), stackCounter[k])
+		}
+		fmt.Println()
+	}
+	{
+		fmt.Println("Summary[by-resource]")
+		max_width := 0
+		keys := make([]string, 0, len(resourceCounter))
+		for k := range resourceCounter {
+			keys = append(keys, k)
+			if len(k) > max_width {
+				max_width = len(k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Println("type:", k, strings.Repeat("-", 1+max_width-len(k)), resourceCounter[k])
 		}
 		fmt.Println()
 	}
 }
 
+type getFlags struct {
+	summarize bool
+	//byStack        bool
+	//byResourceType bool
+}
+
 func newGetCmd() *cobra.Command {
+	flags := getFlags{}
 	cmd := &cobra.Command{
 		Use:   "get",
 		Short: "gets resources on the pulumi service",
-		Args:  cmdutil.MaximumNArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
-			querystring := ""
-			propstring := ""
-			switch len(args) {
-			case 2:
-				propstring = args[1]
-				fallthrough
-			case 1:
-				querystring = args[0]
+			q, p, err := parseArgs(args)
+			if err != nil {
+				fmt.Println(err)
 			}
-			// handle stack queries
-			getAll(parseQuery(querystring), parseProps(propstring))
+			getAll(q, p, flags)
 		},
 	}
+	cmd.PersistentFlags().BoolVarP(
+		&flags.summarize, "summarize", "", false,
+		"Summarize resource counts")
 	return cmd
 }

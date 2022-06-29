@@ -15,8 +15,8 @@ func NewCosmicCmd() *cobra.Command {
 	var verbose int
 
 	cmd := &cobra.Command{
-		Use:   "astro",
-		Short: "Pulumi astro command line",
+		Use:   "cosmic",
+		Short: "Pulumi cosmic command line",
 		PersistentPreRun: cmdutil.RunFunc(func(cmd *cobra.Command, args []string) error {
 			// We run this method for its side-effects. On windows, this will enable the windows terminal
 			// to understand ANSI escape codes.
