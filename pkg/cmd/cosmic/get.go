@@ -63,6 +63,10 @@ func storeResource(stackName backend.StackSummary, resState resource.State, q Qu
 	return nil
 }
 
+func numLen(num int) int {
+	return len(fmt.Sprintf("%d", num))
+}
+
 func handleStack(stackName backend.StackSummary, b httpstate.Backend, q Query, ps []Prop, out chan []string, ctx context.Context) error {
 	stk, err := b.GetStack(ctx, stackName.Name())
 	httpStack := stk.(httpstate.Stack)
@@ -177,48 +181,84 @@ func getAll(q Query, ps []Prop, flags getFlags) {
 
 		total += 1
 	}
-	fmt.Println()
 
+	if !flags.Summarize {
+		return
+	}
+	fmt.Println()
 	fmt.Println("Summary")
 	fmt.Println("total", "-", total)
-	fmt.Println()
 
 	{
+		fmt.Println()
 		fmt.Println("Summary[by-stack]")
+		fmt.Printf("group  count stack\n")
 		max_width := 0
+		max_width_count := 0
 		keys := make([]string, 0, len(stackCounter))
-		for k := range stackCounter {
+		for k, count := range stackCounter {
 			keys = append(keys, k)
 			if len(k) > max_width {
 				max_width = len(k)
 			}
+			if numLen(count) > max_width_count {
+				max_width_count = numLen(count)
+			}
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Println("stack", k, strings.Repeat("-", 1+max_width-len(k)), stackCounter[k])
+			parts := 0
+			for _, p := range strings.Split(k, "/") {
+				if p == "" {
+					continue
+				}
+				parts += 1
+			}
+			indentLevel := "|"
+			indent := strings.Repeat(indentLevel, parts)
+
+			count := stackCounter[k]
+			padding := strings.Repeat(" ", (max_width_count - numLen(count)))
+
+			fmt.Printf("stack: %d%s %s %s\n", count, padding, indent, k)
 		}
-		fmt.Println()
 	}
 	{
-		fmt.Println("Summary[by-resource]")
+		fmt.Println()
+		fmt.Println("Summary[by-resource-type]")
+		fmt.Printf("group  count resource-type\n")
 		max_width := 0
+		max_width_count := 0
 		keys := make([]string, 0, len(resourceCounter))
-		for k := range resourceCounter {
+		for k, count := range resourceCounter {
+			// hack sorting by changing : to a higher priority character than /
+			k = strings.ReplaceAll(k, ":", "\"")
 			keys = append(keys, k)
 			if len(k) > max_width {
 				max_width = len(k)
 			}
+			if numLen(count) > max_width_count {
+				max_width_count = numLen(count)
+			}
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Println("type:", k, strings.Repeat("-", 1+max_width-len(k)), resourceCounter[k])
+			k = strings.ReplaceAll(k, "\"", ":")
+
+			colons := strings.Count(k, ":")
+			subpaths := strings.Count(k, "/")
+			indentLevel := "|"
+			indent := strings.Repeat(indentLevel, colons+subpaths)
+
+			count := resourceCounter[k]
+			padding := strings.Repeat(" ", (max_width_count - numLen(count)))
+			fmt.Printf("type: %d%s %s %s\n", count, padding, indent, k)
 		}
-		fmt.Println()
 	}
 }
 
 type getFlags struct {
-	summarize bool
+	Summarize bool
 	//byStack        bool
 	//byResourceType bool
 }
@@ -237,7 +277,7 @@ func newGetCmd() *cobra.Command {
 		},
 	}
 	cmd.PersistentFlags().BoolVarP(
-		&flags.summarize, "summarize", "", false,
+		&flags.Summarize, "summarize", "", false,
 		"Summarize resource counts")
 	return cmd
 }
