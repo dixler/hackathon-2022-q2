@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path"
 	"sort"
 	"strings"
 
@@ -100,7 +106,7 @@ func handleStack(stackName backend.StackSummary, b httpstate.Backend, q Query, p
 func getAll(q Query, ps []Prop, flags getFlags) {
 	// <org>/<project>/<stack>
 	sink := diag.DefaultSink(os.Stdout, os.Stderr, diag.FormatOptions{
-		Color: colors.Raw,
+		Color: colors.Always,
 	})
 	b, err := httpstate.New(sink, httpstate.DefaultURL())
 	if err != nil {
@@ -142,6 +148,11 @@ func getAll(q Query, ps []Prop, flags getFlags) {
 	stackCounter := make(map[string]int)
 	resourceCounter := make(map[string]int)
 
+	fmt.Print("stack\t\tresourceType\t\tname")
+	for _, prop := range ps {
+		fmt.Printf("\t\t%s", prop.Name)
+	}
+	fmt.Println()
 	for line := range ch {
 		//line, more := <-ch
 		for _, elem := range line {
@@ -263,6 +274,106 @@ type getFlags struct {
 	//byResourceType bool
 }
 
+type schema struct {
+	Resources map[string]struct {
+		Properties map[string]struct {
+			Type string
+		}
+	}
+}
+
+func DownloadFile(filepath string, url string) error {
+
+	// Get the data
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Create the file
+	out, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	// Write the body to file
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+func ensureSchema(provider string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	pulumiHome := path.Join(homeDir, ".pulumi", "schemas")
+
+	filename := fmt.Sprintf("%s.json", provider)
+	url := fmt.Sprintf(
+		"https://raw.githubusercontent.com/pulumi/pulumi-%s/master/provider/cmd/pulumi-resource-%s/schema.json",
+		provider,
+		provider)
+
+	schemaPath := path.Join(pulumiHome, filename)
+	if _, err := os.Stat(schemaPath); errors.Is(err, os.ErrNotExist) {
+		err = DownloadFile(schemaPath, url)
+		if err != nil {
+			return "", err
+		}
+	}
+	return schemaPath, nil
+}
+
+func getProviderSchema(provider string) (schema, error) {
+	schemaPath, err := ensureSchema(provider)
+	if err != nil {
+		return schema{}, err
+	}
+	f, err := os.Open(schemaPath)
+	if err != nil {
+		return schema{}, err
+	}
+	r := bufio.NewReader(f)
+	scm := schema{}
+	json.NewDecoder(r).Decode(&scm)
+	return scm, nil
+}
+
+func suggestResourceProperties(resourceType string, toComplete string) []string {
+	provider := strings.Split(resourceType, ":")[0]
+	scm, err := getProviderSchema(provider)
+	if err != nil {
+		return []string{}
+	}
+	s, ok := scm.Resources[resourceType]
+	if !ok {
+		return []string{}
+	}
+	props := make([]string, 0, len(s.Properties))
+	for name := range s.Properties {
+		props = append(props, name)
+	}
+	return props
+}
+
+func suggestResourceTypes(toComplete string) []string {
+	provider := strings.Split(toComplete, ":")[0]
+	scm, err := getProviderSchema(provider)
+	if err != nil {
+		return []string{toComplete + err.Error()}
+	}
+	keys := make([]string, 0, len(scm.Resources))
+	for k := range scm.Resources {
+		if !strings.HasPrefix(k, toComplete) {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func newGetCmd() *cobra.Command {
 	flags := getFlags{}
 	cmd := &cobra.Command{
@@ -274,6 +385,28 @@ func newGetCmd() *cobra.Command {
 				fmt.Println(err)
 			}
 			getAll(q, p, flags)
+		},
+
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+
+			resourceType := ""
+			for _, v := range args {
+				if strings.Contains(v, ":") {
+					resourceType = v
+					break
+				}
+			}
+
+			if resourceType == "" && strings.Contains(toComplete, ":") {
+				return suggestResourceTypes(toComplete), cobra.ShellCompDirectiveNoFileComp
+			}
+
+			if resourceType != "" {
+				// not currently suggesting a resourceType
+				return suggestResourceProperties(resourceType, toComplete), cobra.ShellCompDirectiveNoFileComp
+			}
+
+			return []string{}, cobra.ShellCompDirectiveNoFileComp
 		},
 	}
 	cmd.PersistentFlags().BoolVarP(

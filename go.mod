@@ -5,9 +5,11 @@ go 1.18
 require (
 	github.com/moby/term v0.0.0-20210619224110-3f7ff695adc6
 	github.com/pulumi/pulumi/sdk v1.14.1
-	github.com/pulumi/pulumi/sdk/v3 v3.35.2
 	github.com/spf13/cobra v1.4.0
+	google.golang.org/protobuf v1.28.0 // indirect
 )
+
+require github.com/pulumi/pulumi/sdk/v3 v3.35.2
 
 require (
 	cloud.google.com/go v0.100.2 // indirect
@@ -90,6 +92,7 @@ require (
 	github.com/sirupsen/logrus v1.7.0 // indirect
 	github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966 // indirect
 	github.com/src-d/gcfg v1.4.0 // indirect
+	github.com/stretchr/testify v1.7.1 // indirect
 	github.com/texttheater/golang-levenshtein v1.0.1 // indirect
 	github.com/xanzy/ssh-agent v0.3.1 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
@@ -107,7 +110,6 @@ require (
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/genproto v0.0.0-20220405205423-9d709892a2bf // indirect
 	google.golang.org/grpc v1.47.0 // indirect
-	google.golang.org/protobuf v1.28.0 // indirect
 	gopkg.in/AlecAivazis/survey.v1 v1.8.9-0.20200217094205-6773bdf39b7f // indirect
 	gopkg.in/square/go-jose.v2 v2.6.0 // indirect
 	gopkg.in/src-d/go-billy.v4 v4.3.2 // indirect
@@ -131,7 +133,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pulumi/pulumi/pkg v1.14.1
 	github.com/spf13/pflag v1.0.5 // indirect
-	github.com/stretchr/testify v1.7.1 // indirect
 	github.com/uber/jaeger-client-go v2.30.0+incompatible // indirect
 	github.com/uber/jaeger-lib v2.4.1+incompatible // indirect
 	go.uber.org/atomic v1.9.0 // indirect
